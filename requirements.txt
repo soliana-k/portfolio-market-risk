@@ -1,0 +1,9 @@
+pandas
+numpy
+yfinance
+arch
+plotly
+streamlit
+loguru
+pytest
+requests-ratelimiter
