@@ -6,4 +6,3 @@ plotly
 streamlit
 loguru
 pytest
-requests-ratelimiter
