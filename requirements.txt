@@ -6,3 +6,8 @@ plotly
 streamlit
 loguru
 pytest
+matplotlib
+seaborn
+statsmodels
+scipy
+

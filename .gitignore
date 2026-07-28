@@ -3,3 +3,7 @@ venv/
 .env
 __pycache__/
 *.pyc
+Kalkidan_DataCollection_2026-07-23_v1.py/
+.pytest_cache/
+notebooks/data_cleaning.ipynb
+src/data_cleaning/clean_data.py
