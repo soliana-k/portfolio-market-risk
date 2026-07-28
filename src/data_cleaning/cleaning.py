@@ -52,21 +52,7 @@ class DataOverview:
         return "\n".join(lines)
 
 
-@dataclass(frozen=True)
-class CleanedDataResult:
-    clean_prices: pd.DataFrame
-    clean_returns: pd.DataFrame
-    portfolio_returns: pd.Series
-    rolling_volatility: pd.Series
-    weights: pd.Series
-    n_missing_filled: int = 0
-    n_stale_removed: int = 0
-    n_returns_winsorized: int = 0
-    metadata: dict = field(default_factory=dict)
-
-
 def data_overview(df: pd.DataFrame) -> DataOverview:
-    
     if df is None or df.empty:
         raise ValueError("df cannot be empty for data overview.")
 
