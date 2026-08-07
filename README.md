@@ -120,3 +120,10 @@ result = run_data_cleaning_pipeline(phase1["prices"], phase1["weights"])
 ```bash
 pytest tests/test_cleaning.py -v
 ```
+
+
+## Phase 3:
+
+```bash
+streamlit run app.py
+```
