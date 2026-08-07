@@ -1,5 +1,6 @@
 import pandas as pd
 from typing import List
+import numpy as np
 import yfinance as yf
 import time
 
@@ -68,3 +69,24 @@ def download_asset_prices(
         raise ValueError("Downloaded price data is empty. Check dates or network connection.")
         
     return prices_df
+
+def download_market_caps(tickers: List[str]) -> pd.Series:
+    """Fetch latest market capitalisation for each ticker (USD)."""
+    caps = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).info
+            mc = info.get("marketCap") or info.get("totalAssets")
+            if mc is None or mc <= 0:
+                shares = info.get("sharesOutstanding")
+                price = info.get("currentPrice") or info.get("regularMarketPrice")
+                if shares and price:
+                    mc = shares * price
+            caps[t] = float(mc) if mc else np.nan
+        except Exception:
+            caps[t] = np.nan
+        time.sleep(0.3)
+    s = pd.Series(caps, dtype=float)
+    if s.isna().all():
+        raise ValueError("Could not retrieve market caps for any ticker.")
+    return s
