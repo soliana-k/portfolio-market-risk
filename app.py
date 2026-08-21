@@ -1,6 +1,6 @@
 """
-Streamlit App – Phase 3 Portfolio Construction
-Integrates Phase 1 (download) + Phase 2 (cleaning) + Phase 3 (construction)
+Streamlit App – Phase 4 Portfolio Construction & Risk Analytics
+Integrates Phase 1 (download) + Phase 2 (cleaning) + Phase 3 (construction) + Phase 4 (Historical VaR)
 """
 
 from __future__ import annotations
@@ -30,16 +30,16 @@ from src.portfolio_construction.portfolio import (
 from src.historical_simulation_var.historical_var import HistoricalSimulation
 
 st.set_page_config(
-    page_title="Portfolio Construction",
+    page_title="Portfolio Risk & Construction",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("📈 Portfolio Construction")
+st.title("📈 Portfolio Construction & Risk Analytics")
 st.caption(
-    "Build equal-weighted, user-defined, market-cap or long-short portfolios "
-    "with configurable rebalancing. Outputs daily value, P&L and returns."
+    "Build multi-asset portfolios with configurable rebalancing and evaluate "
+    "historical VaR, Expected Shortfall, and rolling tail risk."
 )
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
@@ -89,8 +89,12 @@ with st.sidebar:
         step=0.5,
     )
     volatility_window = st.slider("Rolling volatility window", 10, 750, 21)
-    conf_str=st.selectbox("Confidence Level", ['99%', '95%', '99.5%'])
+
+    st.divider()
+    st.subheader("🛡️ Risk Parameters (Phase 4)")
+    conf_str = st.selectbox("Confidence Level", ['95%', '99%', '99.5%'], index=0)
     confidence_level = float(conf_str.replace("%", "")) / 100.0
+    rolling_window = st.selectbox("Rolling Lookback Window (Days)", options=[250, 500, 750], index=0)
 
     st.divider()
     st.subheader("Portfolio scheme")
@@ -150,7 +154,6 @@ with st.sidebar:
     with st.expander("Advanced – Cleaning options"):
         apply_winsor = st.checkbox("Winsorise returns", value=False)
         stale_window = st.slider("Stale-price window", 2, 10, 3)
-        vol_window = st.slider("Rolling vol window", 10, 60, 21)
 
 # ── Main ───────────────────────────────────────────────────────────────────
 if not run_btn:
@@ -220,12 +223,15 @@ try:
         rebalance_freq=rebalance_freq,  # type: ignore
         transaction_cost_bps=float(transaction_cost_bps),
     )
+    
     risk_sim = HistoricalSimulation(
         portfolio_values=result.portfolio_value,
         portfolio_pnl=result.portfolio_pnl,
         confidence_level=confidence_level,
     )
     risk_metrics = risk_sim.pnl_calculation()
+    rolling_df = risk_sim.rolling_var_series(window=rolling_window)
+    
     progress.progress(100, text="Done")
     status.success("Portfolio constructed successfully!")
 
@@ -260,8 +266,8 @@ r4.metric("Expected Shortfall (%)", f"{risk_metrics['es_pct']:.2%}")
 
 st.divider()
 
-tab_val, tab_pnl, tab_ret, tab_w, tab_data = st.tabs(
-    ["📊 Portfolio Value", "💰 Daily P&L", "📈 Returns", "⚖️ Weights & Holdings", "📋 Data Tables"]
+tab_val, tab_pnl, tab_risk, tab_ret, tab_w, tab_data = st.tabs(
+    ["📊 Portfolio Value", "💰 Daily P&L", "🛡️ Risk & VaR", "📈 Returns", "⚖️ Weights", "📋 Data"]
 )
 
 with tab_val:
@@ -310,19 +316,19 @@ with tab_pnl:
         title="Daily Portfolio P&L ($)",
         xaxis_title="Date",
         yaxis_title="P&L ($)",
-        height=400,
+        height=450,
         template="plotly_white",
     )
     st.plotly_chart(fig_pnl, use_container_width=True)
 
-    # ── Add Historical PnL Distribution & VaR Cutoff Plot ─────────────────
-    st.subheader("Historical PnL Distribution & Tail Risk")
+with tab_risk:
+    st.subheader(f"Historical P&L Distribution & Tail Risk Cutoffs ({conf_str})")
     fig_dist = go.Figure()
     fig_dist.add_trace(
         go.Histogram(
             x=result.portfolio_pnl,
-            nbinsx=40,
-            name="PnL Frequency",
+            nbinsx=50,
+            name="Daily P&L",
             marker_color="skyblue",
             opacity=0.75,
         )
@@ -342,13 +348,52 @@ with tab_pnl:
         annotation_position="bottom left",
     )
     fig_dist.update_layout(
-        title="Portfolio Daily PnL Frequency Distribution",
+        title="Portfolio Daily P&L Frequency Distribution",
         xaxis_title="Daily Profit / Loss ($)",
         yaxis_title="Frequency",
-        height=400,
         template="plotly_white",
+        height=400,
     )
     st.plotly_chart(fig_dist, use_container_width=True)
+
+    st.subheader(f"Rolling {rolling_window}-Day Risk Time Series")
+    fig_rolling = go.Figure()
+    fig_rolling.add_trace(go.Scatter(
+        x=rolling_df.index, y=rolling_df["rolling_var"],
+        mode="lines", name=f"Rolling VaR ({conf_str})", line=dict(color="red", width=1.5)
+    ))
+    fig_rolling.add_trace(go.Scatter(
+        x=rolling_df.index, y=rolling_df["rolling_es"],
+        mode="lines", name="Rolling Expected Shortfall", line=dict(color="darkred", width=1.5, dash="dash")
+    ))
+    fig_rolling.update_layout(
+        title=f"Rolling VaR vs Expected Shortfall ($)",
+        xaxis_title="Date",
+        yaxis_title="Risk Measure ($)",
+        template="plotly_white",
+        height=400,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_rolling, use_container_width=True)
+
+    st.subheader("Tail Loss Events Exceeding VaR Threshold")
+    tail_losses_series = result.portfolio_pnl[result.portfolio_pnl <= -risk_metrics["var_dollar"]]
+    fig_tail = go.Figure(
+        go.Bar(
+            x=tail_losses_series.index,
+            y=tail_losses_series,
+            marker_color="darkred",
+            name="Tail Losses"
+        )
+    )
+    fig_tail.update_layout(
+        title=f"Filtered Tail Losses Below -${risk_metrics['var_dollar']:,.0f}",
+        xaxis_title="Date",
+        yaxis_title="Loss Amount ($)",
+        template="plotly_white",
+        height=350,
+    )
+    st.plotly_chart(fig_tail, use_container_width=True)
 
 with tab_ret:
     fig_ret = make_subplots(
