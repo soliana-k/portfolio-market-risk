@@ -57,7 +57,7 @@ class HistoricalSimulation:
             current_val = val_vals[i - 1]
             
             sorted_window = np.sort(window_pnl)
-            var_idx = int(np.floor(alpha * window_pnl))
+            var_idx = int(np.floor(alpha * window))
             var_dollar = sorted_window[max(0, var_idx)]
             
             tail_losses = sorted_window[sorted_window <= var_dollar]

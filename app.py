@@ -1,6 +1,6 @@
 """
-Streamlit App – Phase 4 Portfolio Construction & Risk Analytics
-Integrates Phase 1 (download) + Phase 2 (cleaning) + Phase 3 (construction) + Phase 4 (Historical VaR)
+Streamlit App - Portfolio Construction & Risk Analytics
+Professional-grade UI inspired by Bloomberg Terminal / Yahoo Finance
 """
 
 from __future__ import annotations
@@ -28,23 +28,29 @@ from src.portfolio_construction.portfolio import (
     PortfolioResult,
 )
 from src.historical_simulation_var.historical_var import HistoricalSimulation
+from src.garch_var.garch import fit_garch
+from src.gjr_garch.gjr import fit_gjr_garch
+from src.ewma_var.ewma import fit_ewma
+from src.var_backtesting.backtest import run_all_backtests, backtest_model
+from src.model_comparison.compare import assemble_comparison, MODEL_ORDER
+from src.stress_testing.stress import run_stress_tests
 
+# ── Page Config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Portfolio Risk & Construction",
-    page_icon="📈",
+    page_title="Portfolio Risk Engine",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-st.title("📈 Portfolio Construction & Risk Analytics")
+st.markdown("# Portfolio Construction & Risk Analytics")
 st.caption(
-    "Build multi-asset portfolios with configurable rebalancing and evaluate "
-    "historical VaR, Expected Shortfall, and rolling tail risk."
+    "Multi-asset portfolio construction with configurable rebalancing, "
+    "Historical VaR, Expected Shortfall, GARCH volatility modelling, and stress testing."
 )
 
-# ── Sidebar ────────────────────────────────────────────────────────────────
+# ── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Inputs")
+    st.markdown("### Portfolio Configuration")
 
     tickers_raw = st.text_input(
         "Tickers (comma-separated)",
@@ -90,14 +96,14 @@ with st.sidebar:
     )
     volatility_window = st.slider("Rolling volatility window", 10, 750, 21)
 
-    st.divider()
-    st.subheader("🛡️ Risk Parameters (Phase 4)")
+    st.markdown("---")
+    st.markdown("### Risk Parameters")
     conf_str = st.selectbox("Confidence Level", ['95%', '99%', '99.5%'], index=0)
     confidence_level = float(conf_str.replace("%", "")) / 100.0
     rolling_window = st.selectbox("Rolling Lookback Window (Days)", options=[250, 500, 750], index=0)
 
-    st.divider()
-    st.subheader("Portfolio scheme")
+    st.markdown("---")
+    st.markdown("### Portfolio Scheme")
 
     scheme = st.radio(
         "Weighting method",
@@ -118,10 +124,10 @@ with st.sidebar:
     short_weight = 0.5
 
     if scheme == "user":
-        st.markdown("**Enter weights** (will be normalised to sum = 1)")
+        st.markdown("**Enter weights** (normalised to sum = 1)")
         for t in tickers:
             user_weights[t] = st.number_input(
-                f"Weight – {t}",
+                f"Weight - {t}",
                 min_value=0.0,
                 max_value=1.0,
                 value=round(1.0 / max(len(tickers), 1), 4),
@@ -148,14 +154,14 @@ with st.sidebar:
         short_tickers = short_sel
         short_weight = st.slider("Total short weight (absolute)", 0.0, 1.0, 0.5, 0.05)
 
-    st.divider()
-    run_btn = st.button("🚀 Build Portfolio", type="primary", use_container_width=True)
+    st.markdown("---")
+    run_btn = st.button("Build Portfolio", type="primary", width="stretch")
 
-    with st.expander("Advanced – Cleaning options"):
+    with st.expander("Cleaning options"):
         apply_winsor = st.checkbox("Winsorise returns", value=False)
         stale_window = st.slider("Stale-price window", 2, 10, 3)
 
-# ── Main ───────────────────────────────────────────────────────────────────
+# ── Main ────────────────────────────────────────────────────────────────────
 if not run_btn:
     st.info(
         "Configure the inputs in the sidebar and click **Build Portfolio** "
@@ -171,11 +177,11 @@ if start_date >= end_date:
     st.error("Start date must be before end date.")
     st.stop()
 
-progress = st.progress(0, text="Starting…")
+progress = st.progress(0, text="Starting...")
 status = st.empty()
 
 try:
-    status.info("Resolving target weights…")
+    status.info("Resolving target weights...")
     progress.progress(10, text="Weights")
 
     target_w = resolve_target_weights(
@@ -188,7 +194,7 @@ try:
         short_weight=short_weight,
     )
 
-    status.info(f"Downloading prices for {', '.join(tickers)} …")
+    status.info(f"Downloading prices for {', '.join(tickers)}...")
     progress.progress(25, text="Downloading")
 
     prices_raw = download_asset_prices(
@@ -199,7 +205,7 @@ try:
     )
     prices = prices_raw[tickers].copy()
 
-    status.info("Running data-cleaning pipeline…")
+    status.info("Running data-cleaning pipeline...")
     progress.progress(50, text="Cleaning")
 
     cleaned = run_data_cleaning_pipeline(
@@ -213,7 +219,7 @@ try:
     )
     clean_prices = cleaned.clean_prices
 
-    status.info("Constructing portfolio with rebalancing…")
+    status.info("Constructing portfolio with rebalancing...")
     progress.progress(75, text="Construction")
 
     result: PortfolioResult = construct_portfolio(
@@ -223,7 +229,7 @@ try:
         rebalance_freq=rebalance_freq,  # type: ignore
         transaction_cost_bps=float(transaction_cost_bps),
     )
-    
+
     risk_sim = HistoricalSimulation(
         portfolio_values=result.portfolio_value,
         portfolio_pnl=result.portfolio_pnl,
@@ -231,9 +237,72 @@ try:
     )
     risk_metrics = risk_sim.pnl_calculation()
     rolling_df = risk_sim.rolling_var_series(window=rolling_window)
-    
+
+    status.info("Fitting GARCH(1,1) volatility model...")
+    progress.progress(90, text="GARCH")
+
+    garch_res = fit_garch(
+        result.portfolio_returns,
+        confidence_level=confidence_level,
+        portfolio_value=float(initial_value),
+    )
+
+    status.info("Fitting GJR-GARCH volatility model (asymmetric)...")
+    progress.progress(95, text="GJR-GARCH")
+
+    gjr_res = fit_gjr_garch(
+        result.portfolio_returns,
+        confidence_level=confidence_level,
+        portfolio_value=float(initial_value),
+    )
+
+    status.info("Running VaR backtests (rolling out-of-sample)...")
+    progress.progress(97, text="Backtest")
+
+    bt_window = int(max(250, min(750, len(result.portfolio_returns) - 250)))
+    bt_results = run_all_backtests(
+        result.portfolio_returns,
+        confidence_level=confidence_level,
+        estimation_window=bt_window,
+        portfolio_value=float(initial_value),
+    )
+
+    status.info("Comparing all VaR models (incl. EWMA)...")
+    progress.progress(98, text="Compare")
+
+    ewma_bt = backtest_model(
+        result.portfolio_returns,
+        lambda tr, cl, pv: fit_ewma(tr, confidence_level=cl, portfolio_value=pv).var_pct,
+        model_name="EWMA",
+        confidence_level=confidence_level,
+        estimation_window=bt_window,
+        portfolio_value=float(initial_value),
+    )
+    cmp_results = assemble_comparison(
+        {**bt_results, "EWMA": ewma_bt}, confidence_level
+    )
+
+    status.info("Running stress tests (historical + hypothetical scenarios)...")
+    progress.progress(99, text="Stress")
+
+    asset_returns = clean_prices.pct_change().dropna()
+    ewma_full = fit_ewma(
+        result.portfolio_returns,
+        confidence_level=confidence_level,
+        portfolio_value=float(initial_value),
+    )
+    stress = run_stress_tests(
+        portfolio_value=float(initial_value),
+        weights=result.target_weights,
+        portfolio_returns=result.portfolio_returns,
+        asset_returns=asset_returns,
+        baseline_var_pct=gjr_res.var_pct,
+        baseline_es_pct=gjr_res.es_pct,
+        confidence_level=confidence_level,
+    )
+
     progress.progress(100, text="Done")
-    status.success("Portfolio constructed successfully!")
+    status.success("Portfolio constructed successfully.")
 
 except Exception as e:
     progress.empty()
@@ -242,7 +311,66 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# ── Results ────────────────────────────────────────────────────────────────
+# Clear the transient progress bar and status message once results render,
+# so the dashboard front stays clean.
+progress.empty()
+status.empty()
+
+# ── Chart Theme ─────────────────────────────────────────────────────────────
+CHART_BG = "#ffffff"
+CHART_PAPER = "#ffffff"
+CHART_GRID = "#f0f0f0"
+CHART_FONT = "#333333"
+CHART_FONT_SIZE = 11
+
+COLOR_PRIMARY = "#0d6efd"
+COLOR_NEGATIVE = "#dc3545"
+COLOR_POSITIVE = "#198754"
+COLOR_SECONDARY = "#6c757d"
+COLOR_HIST = "#adb5bd"
+COLOR_GARCH = "#6f42c1"
+COLOR_GJR = "#20c997"
+COLOR_EWMA = "#fd7e14"
+COLOR_ACCENT = "#0dcaf0"
+
+MODEL_COLORS = {
+    "Historical": COLOR_PRIMARY,
+    "EWMA": COLOR_EWMA,
+    "GARCH": COLOR_GARCH,
+    "GJR-GARCH": COLOR_GJR,
+}
+
+
+def _apply_chart_layout(fig, title="", height=420, yformat="", x_title="", y_title=""):
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=13, color=CHART_FONT, family="Inter"), x=0.01),
+        paper_bgcolor=CHART_PAPER,
+        plot_bgcolor=CHART_BG,
+        font=dict(size=CHART_FONT_SIZE, color=CHART_FONT, family="Inter"),
+        xaxis=dict(
+            gridcolor=CHART_GRID, gridwidth=0.5,
+            linecolor="#dee2e6", linewidth=0.5,
+            title=dict(text=x_title, font=dict(size=11)),
+        ),
+        yaxis=dict(
+            gridcolor=CHART_GRID, gridwidth=0.5,
+            linecolor="#dee2e6", linewidth=0.5,
+            title=dict(text=y_title, font=dict(size=11)),
+            tickformat=yformat,
+        ),
+        margin=dict(l=50, r=20, t=40, b=40),
+        height=height,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="white", font_size=11, font_family="Inter"),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(size=10), bgcolor="rgba(255,255,255,0.8)",
+        ),
+    )
+    return fig
+
+
+# ── Results: Dashboard KPI Header ──────────────────────────────────────────
 meta = result.metadata
 
 k1, k2, k3, k4, k5 = st.columns(5)
@@ -255,21 +383,92 @@ k5.metric(
     f"{(result.portfolio_value / result.portfolio_value.cummax() - 1).min():.2%}",
 )
 
-st.divider()
-st.subheader(f"🛡️ Risk Analytics (Historical VaR at {conf_str} Confidence)")
+# ── Risk & Volatility Model Summary (collapsible) ──────────────────────────
+# Kept behind an accordion so the dashboard front stays clean and professional.
+with st.expander(
+    "VaR & Volatility Model Summary "
+    f"(Historical / GARCH / GJR-GARCH - {conf_str} Confidence)"
+):
+    summary_rows = [
+        {
+            "Metric": "VaR (%)",
+            "Historical": f"{risk_metrics['var_pct']:.2%}",
+            "GARCH": f"{garch_res.var_pct:.2%}",
+            "GJR-GARCH": f"{gjr_res.var_pct:.2%}",
+        },
+        {
+            "Metric": "VaR ($)",
+            "Historical": f"${risk_metrics['var_dollar']:,.2f}",
+            "GARCH": f"${garch_res.var_dollar:,.2f}",
+            "GJR-GARCH": f"${gjr_res.var_dollar:,.2f}",
+        },
+        {
+            "Metric": "Expected Shortfall (%)",
+            "Historical": f"{risk_metrics['es_pct']:.2%}",
+            "GARCH": f"{garch_res.es_pct:.2%}",
+            "GJR-GARCH": f"{gjr_res.es_pct:.2%}",
+        },
+        {
+            "Metric": "Expected Shortfall ($)",
+            "Historical": f"${risk_metrics['es_dollar']:,.2f}",
+            "GARCH": f"${garch_res.es_dollar:,.2f}",
+            "GJR-GARCH": f"${gjr_res.es_dollar:,.2f}",
+        },
+        {
+            "Metric": "1-Day sigma Forecast",
+            "Historical": "-",
+            "GARCH": f"{garch_res.sigma_forecast:.2%}",
+            "GJR-GARCH": f"{gjr_res.sigma_forecast:.2%}",
+        },
+    ]
+    st.dataframe(
+        pd.DataFrame(summary_rows).set_index("Metric"),
+        use_container_width=True,
+        hide_index=False,
+    )
 
-r1, r2, r3, r4 = st.columns(4)
-r1.metric("Historical VaR ($)", f"${risk_metrics['var_dollar']:,.2f}")
-r2.metric("Historical VaR (%)", f"{risk_metrics['var_pct']:.2%}")
-r3.metric("Expected Shortfall ($)", f"${risk_metrics['es_dollar']:,.2f}")
-r4.metric("Expected Shortfall (%)", f"{risk_metrics['es_pct']:.2%}")
+    st.markdown("**Estimated model parameters**")
 
-st.divider()
+    def _fmt(v):
+        return "-" if v is None else f"{float(v):.6f}"
 
-tab_val, tab_pnl, tab_risk, tab_ret, tab_w, tab_data = st.tabs(
-    ["📊 Portfolio Value", "💰 Daily P&L", "🛡️ Risk & VaR", "📈 Returns", "⚖️ Weights", "📋 Data"]
+    param_rows = [
+        {
+            "Parameter": "omega",
+            "GARCH(1,1)": _fmt(garch_res.params.get("omega")),
+            "GJR-GARCH": _fmt(gjr_res.omega),
+        },
+        {
+            "Parameter": "alpha[1]",
+            "GARCH(1,1)": _fmt(garch_res.params.get("alpha[1]")),
+            "GJR-GARCH": _fmt(gjr_res.alpha),
+        },
+        {
+            "Parameter": "beta[1]",
+            "GARCH(1,1)": _fmt(garch_res.params.get("beta[1]")),
+            "GJR-GARCH": _fmt(gjr_res.beta),
+        },
+        {
+            "Parameter": "gamma[1] (leverage)",
+            "GARCH(1,1)": "-",
+            "GJR-GARCH": _fmt(gjr_res.leverage_parameter),
+        },
+    ]
+    st.dataframe(
+        pd.DataFrame(param_rows).set_index("Parameter"),
+        use_container_width=True,
+        hide_index=False,
+    )
+
+st.markdown("---")
+
+# ── Tabs ────────────────────────────────────────────────────────────────────
+tab_val, tab_pnl, tab_risk, tab_bt, tab_cmp, tab_stress, tab_ret, tab_w, tab_data = st.tabs(
+    ["Portfolio Value", "Daily P&L", "Risk & VaR", "Backtest",
+     "Model Comparison", "Stress Testing", "Returns", "Weights", "Data"]
 )
 
+# ── Tab: Portfolio Value ────────────────────────────────────────────────────
 with tab_val:
     fig = go.Figure()
     fig.add_trace(
@@ -278,7 +477,7 @@ with tab_val:
             y=result.portfolio_value,
             mode="lines",
             name="Portfolio Value",
-            line=dict(width=2, color="#1f77b4"),
+            line=dict(width=1.8, color=COLOR_PRIMARY),
         )
     )
     if len(result.rebalance_dates) > 0:
@@ -289,112 +488,650 @@ with tab_val:
                 y=rebal_vals,
                 mode="markers",
                 name="Rebalance",
-                marker=dict(size=8, color="red", symbol="diamond"),
+                marker=dict(size=6, color=COLOR_NEGATIVE, symbol="diamond-open", line=dict(width=1.5)),
             )
         )
-    fig.update_layout(
-        title="Daily Portfolio Value",
-        xaxis_title="Date",
-        yaxis_title="Value ($)",
-        hovermode="x unified",
-        height=480,
-        template="plotly_white",
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    _apply_chart_layout(fig, title="Daily Portfolio Value", y_title="Value ($)", yformat="$.0f")
+    fig.update_layout(height=440)
+    st.plotly_chart(fig, width="stretch")
 
+# ── Tab: Daily P&L ─────────────────────────────────────────────────────────
 with tab_pnl:
-    colors = np.where(result.portfolio_pnl >= 0, "#2ca02c", "#d62728")
+    colors = [COLOR_POSITIVE if v >= 0 else COLOR_NEGATIVE for v in result.portfolio_pnl]
     fig_pnl = go.Figure(
         go.Bar(
             x=result.portfolio_pnl.index,
             y=result.portfolio_pnl,
             marker_color=colors,
             name="Daily P&L",
+            marker_line_width=0,
         )
     )
-    fig_pnl.update_layout(
-        title="Daily Portfolio P&L ($)",
-        xaxis_title="Date",
-        yaxis_title="P&L ($)",
-        height=450,
-        template="plotly_white",
-    )
-    st.plotly_chart(fig_pnl, use_container_width=True)
+    _apply_chart_layout(fig_pnl, title="Daily Portfolio P&L ($)", y_title="P&L ($)", yformat="$,.0f")
+    fig_pnl.update_layout(height=420)
+    st.plotly_chart(fig_pnl, width="stretch")
 
+# ── Tab: Risk & VaR ────────────────────────────────────────────────────────
 with tab_risk:
-    st.subheader(f"Historical P&L Distribution & Tail Risk Cutoffs ({conf_str})")
+    st.markdown(f"#### P&L Distribution & Tail Risk Cutoffs ({conf_str})")
     fig_dist = go.Figure()
     fig_dist.add_trace(
         go.Histogram(
             x=result.portfolio_pnl,
             nbinsx=50,
             name="Daily P&L",
-            marker_color="skyblue",
-            opacity=0.75,
+            marker_color=COLOR_HIST,
+            marker_line=dict(width=0.5, color="#dee2e6"),
+            opacity=0.8,
         )
     )
     fig_dist.add_vline(
         x=-risk_metrics["var_dollar"],
         line_dash="dash",
-        line_color="red",
+        line_color=COLOR_NEGATIVE,
+        line_width=1.5,
         annotation_text=f"VaR ({conf_str}): -${risk_metrics['var_dollar']:,.0f}",
         annotation_position="top left",
+        annotation_font=dict(size=10),
     )
     fig_dist.add_vline(
         x=-risk_metrics["es_dollar"],
         line_dash="dot",
-        line_color="darkred",
-        annotation_text=f"Expected Shortfall: -${risk_metrics['es_dollar']:,.0f}",
+        line_color="#8b0000",
+        line_width=1.5,
+        annotation_text=f"ES: -${risk_metrics['es_dollar']:,.0f}",
         annotation_position="bottom left",
+        annotation_font=dict(size=10),
     )
-    fig_dist.update_layout(
-        title="Portfolio Daily P&L Frequency Distribution",
-        xaxis_title="Daily Profit / Loss ($)",
-        yaxis_title="Frequency",
-        template="plotly_white",
-        height=400,
-    )
-    st.plotly_chart(fig_dist, use_container_width=True)
+    _apply_chart_layout(fig_dist, title="Portfolio Daily P&L Frequency Distribution",
+                        y_title="Frequency", x_title="Daily Profit / Loss ($)")
+    st.plotly_chart(fig_dist, width="stretch")
 
-    st.subheader(f"Rolling {rolling_window}-Day Risk Time Series")
+    st.markdown(f"#### Rolling {rolling_window}-Day Risk Time Series")
     fig_rolling = go.Figure()
-    fig_rolling.add_trace(go.Scatter(
-        x=rolling_df.index, y=rolling_df["rolling_var"],
-        mode="lines", name=f"Rolling VaR ({conf_str})", line=dict(color="red", width=1.5)
-    ))
-    fig_rolling.add_trace(go.Scatter(
-        x=rolling_df.index, y=rolling_df["rolling_es"],
-        mode="lines", name="Rolling Expected Shortfall", line=dict(color="darkred", width=1.5, dash="dash")
-    ))
-    fig_rolling.update_layout(
-        title=f"Rolling VaR vs Expected Shortfall ($)",
-        xaxis_title="Date",
-        yaxis_title="Risk Measure ($)",
-        template="plotly_white",
-        height=400,
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_rolling, use_container_width=True)
+    var_col = "rolling_var" if "rolling_var" in rolling_df.columns else rolling_df.columns[0]
+    es_col = "rolling_es" if "rolling_es" in rolling_df.columns else rolling_df.columns[1]
 
-    st.subheader("Tail Loss Events Exceeding VaR Threshold")
+    fig_rolling.add_trace(go.Scatter(
+        x=rolling_df.index, y=rolling_df[var_col],
+        mode="lines", name=f"Rolling VaR ({conf_str})",
+        line=dict(color=COLOR_NEGATIVE, width=1.2),
+    ))
+    fig_rolling.add_trace(go.Scatter(
+        x=rolling_df.index, y=rolling_df[es_col],
+        mode="lines", name="Rolling Expected Shortfall",
+        line=dict(color="#8b0000", width=1.2, dash="dash"),
+    ))
+    _apply_chart_layout(fig_rolling, title=f"Rolling VaR vs Expected Shortfall ($)",
+                        y_title="Risk Measure ($)")
+    st.plotly_chart(fig_rolling, width="stretch")
+
+    st.markdown("#### GARCH(1,1) Conditional Volatility")
+    fig_garch = go.Figure()
+    fig_garch.add_trace(go.Scatter(
+        x=garch_res.conditional_volatility.index,
+        y=garch_res.conditional_volatility,
+        mode="lines", name="Conditional sigma (daily)",
+        line=dict(color=COLOR_GARCH, width=1),
+    ))
+    fig_garch.add_hline(
+        y=garch_res.sigma_forecast,
+        line_dash="dash", line_color=COLOR_NEGATIVE, line_width=1,
+        annotation_text=f"1-Day Forecast: {garch_res.sigma_forecast:.2%}",
+        annotation_position="top right",
+        annotation_font=dict(size=10),
+    )
+    _apply_chart_layout(fig_garch, title="Conditional Volatility (GARCH(1,1))",
+                        y_title="Volatility", yformat=".1%")
+    st.plotly_chart(fig_garch, width="stretch")
+
+    # GJR-GARCH
+    st.markdown("#### GJR-GARCH Conditional Volatility")
+    fig_gjr = go.Figure()
+    fig_gjr.add_trace(go.Scatter(
+        x=gjr_res.conditional_volatility.index,
+        y=gjr_res.conditional_volatility,
+        mode="lines", name="GJR sigma (daily)",
+        line=dict(color=COLOR_GJR, width=1),
+    ))
+    fig_gjr.add_hline(
+        y=gjr_res.sigma_forecast,
+        line_dash="dash", line_color=COLOR_NEGATIVE, line_width=1,
+        annotation_text=f"1-Day Forecast: {gjr_res.sigma_forecast:.2%}",
+        annotation_position="top right",
+        annotation_font=dict(size=10),
+    )
+    _apply_chart_layout(fig_gjr, title="Conditional Volatility (GJR-GARCH)",
+                        y_title="Volatility", yformat=".1%")
+    st.plotly_chart(fig_gjr, width="stretch")
+
+    # Vol comparison
+    st.markdown("#### GARCH vs GJR-GARCH Volatility Comparison")
+    cmp = pd.DataFrame({
+        "GJR-GARCH": gjr_res.conditional_volatility,
+        "GARCH(1,1)": gjr_res.garch_conditional_volatility,
+    }).dropna()
+    fig_cmp = go.Figure()
+    fig_cmp.add_trace(go.Scatter(
+        x=cmp.index, y=cmp["GJR-GARCH"],
+        mode="lines", name="GJR-GARCH sigma",
+        line=dict(color=COLOR_GJR, width=1),
+    ))
+    fig_cmp.add_trace(go.Scatter(
+        x=cmp.index, y=cmp["GARCH(1,1)"],
+        mode="lines", name="GARCH(1,1) sigma",
+        line=dict(color=COLOR_GARCH, width=1, dash="dot"),
+    ))
+    _apply_chart_layout(fig_cmp, title="Conditional Volatility: GARCH vs GJR-GARCH",
+                        y_title="Volatility", yformat=".1%")
+    st.plotly_chart(fig_cmp, width="stretch")
+
+    # Leverage
+    st.markdown("#### Leverage Effect (Asymmetry)")
+    ls = gjr_res.leverage_stats
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Avg sigma after negative day", f"{ls['avg_vol_after_negative']:.2%}")
+    c2.metric("Avg sigma after positive day", f"{ls['avg_vol_after_positive']:.2%}")
+    c3.metric("Neg / Pos sigma ratio", f"{ls['vol_ratio_neg_over_pos']:.3f}")
+
+    lev_df = pd.DataFrame({
+        "return": gjr_res.returns,
+        "cond_vol_next": gjr_res.conditional_volatility.shift(-1),
+        "sign": np.where(gjr_res.returns < 0, "Negative return", "Positive return"),
+    }).dropna()
+    fig_lev = px.scatter(
+        lev_df, x="return", y="cond_vol_next", color="sign",
+        color_discrete_map={"Negative return": COLOR_NEGATIVE, "Positive return": COLOR_POSITIVE},
+        opacity=0.5,
+        labels={"return": "Daily return", "cond_vol_next": "Next-day conditional sigma"},
+    )
+    _apply_chart_layout(fig_lev, title="Leverage Effect: Negative Returns -> Higher Next-Day Volatility",
+                        yformat=".1%", y_title="Next-day conditional sigma")
+    st.plotly_chart(fig_lev, width="stretch")
+
+    # VaR comparison bar
+    st.markdown(f"#### VaR Comparison ({conf_str})")
+    fig_var = go.Figure()
+    fig_var.add_trace(go.Bar(
+        x=["Historical VaR", "GARCH-Scaled VaR", "GJR-GARCH-Scaled VaR"],
+        y=[risk_metrics["var_pct"], garch_res.var_pct, gjr_res.var_pct],
+        marker_color=[COLOR_PRIMARY, COLOR_GARCH, COLOR_GJR],
+        text=[
+            f"{risk_metrics['var_pct']:.2%}",
+            f"{garch_res.var_pct:.2%}",
+            f"{gjr_res.var_pct:.2%}",
+        ],
+        textposition="auto",
+        name="VaR (%)",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_var, title="Value-at-Risk Comparison (% of portfolio)",
+                        y_title="VaR (%)", yformat=".1%")
+    st.plotly_chart(fig_var, width="stretch")
+
+    # Tail losses
+    st.markdown("#### Tail Loss Events Exceeding VaR Threshold")
     tail_losses_series = result.portfolio_pnl[result.portfolio_pnl <= -risk_metrics["var_dollar"]]
     fig_tail = go.Figure(
         go.Bar(
             x=tail_losses_series.index,
             y=tail_losses_series,
-            marker_color="darkred",
-            name="Tail Losses"
+            marker_color="#8b0000",
+            name="Tail Losses",
+            marker_line_width=0,
         )
     )
-    fig_tail.update_layout(
-        title=f"Filtered Tail Losses Below -${risk_metrics['var_dollar']:,.0f}",
-        xaxis_title="Date",
-        yaxis_title="Loss Amount ($)",
-        template="plotly_white",
-        height=350,
-    )
-    st.plotly_chart(fig_tail, use_container_width=True)
+    _apply_chart_layout(fig_tail,
+                        title=f"Filtered Tail Losses Below -${risk_metrics['var_dollar']:,.0f}",
+                        y_title="Loss Amount ($)", yformat="$,.0f")
+    fig_tail.update_layout(height=350)
+    st.plotly_chart(fig_tail, width="stretch")
 
+# ── Tab: Backtest ───────────────────────────────────────────────────────────
+with tab_bt:
+    st.markdown(f"#### VaR Backtesting - Rolling Out-of-Sample (est. window = {bt_window})")
+    st.caption(
+        "Each day in the backtest period, the VaR is re-estimated using only the "
+        "preceding estimation window. An exception occurs when the realised loss "
+        "exceeds the VaR. Models are assessed with the Kupiec POF, Christoffersen "
+        "independence & conditional-coverage tests, and the Basel Traffic Light."
+    )
+
+    bt_rows = []
+    for name, btr in bt_results.items():
+        bt_rows.append({
+            "Model": name,
+            "Obs": btr.n_observations,
+            "Exceptions": btr.n_exceptions,
+            "Expected": round(btr.expected_exceptions, 1),
+            "Ratio": f"{btr.exception_ratio:.2%}",
+            "Kupiec p": f"{btr.kupiec_pof_pvalue:.3g}",
+            "Indep p": f"{btr.christoffersen_independence_pvalue:.3g}",
+            "CC p": f"{btr.christoffersen_cc_pvalue:.3g}",
+            "Basel": btr.basel_zone,
+            "Result": btr.pass_fail,
+        })
+    bt_df = pd.DataFrame(bt_rows).set_index("Model")
+    st.dataframe(bt_df, width="stretch")
+
+    bt_model = st.selectbox(
+        "Model to visualise", options=list(bt_results.keys()), index=0,
+    )
+    btr = bt_results[bt_model]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Exceptions", f"{btr.n_exceptions} / {btr.n_observations}")
+    c2.metric("Expected Exceptions", f"{btr.expected_exceptions:.1f}")
+    c3.metric("Exception Ratio", f"{btr.exception_ratio:.2%}")
+    c4.metric("Basel Zone", btr.basel_zone, delta=btr.pass_fail)
+
+    st.markdown(f"#### {bt_model}: VaR Forecast vs Realised Returns")
+    plot_df = pd.DataFrame({
+        "actual": btr.actual_returns,
+        "VaR": btr.var_series,
+    })
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(
+        x=plot_df.index, y=plot_df["actual"], mode="lines",
+        name="Actual return", line=dict(color=COLOR_PRIMARY, width=0.8),
+    ))
+    fig_bt.add_trace(go.Scatter(
+        x=plot_df.index, y=plot_df["VaR"], mode="lines",
+        name="VaR (1-day)", line=dict(color=COLOR_EWMA, width=1, dash="dot"),
+    ))
+    exc = plot_df[btr.exceptions.astype(bool)]
+    fig_bt.add_trace(go.Scatter(
+        x=exc.index, y=exc["actual"], mode="markers",
+        name="Exception",
+        marker=dict(color=COLOR_NEGATIVE, size=5, symbol="x"),
+    ))
+    _apply_chart_layout(fig_bt, title=f"{bt_model} - Realised Returns vs VaR",
+                        y_title="Return", yformat=".1%")
+    st.plotly_chart(fig_bt, width="stretch")
+
+    st.markdown("#### Exceptions vs Expected")
+    zone_color = {"Green": COLOR_POSITIVE, "Yellow": COLOR_EWMA, "Red": COLOR_NEGATIVE}
+    fig_exc = go.Figure()
+    fig_exc.add_trace(go.Bar(
+        x=["Expected", "Observed"],
+        y=[btr.expected_exceptions, btr.n_exceptions],
+        marker_color=[COLOR_PRIMARY, zone_color[btr.basel_zone]],
+        text=[f"{btr.expected_exceptions:.1f}", f"{btr.n_exceptions}"],
+        textposition="auto",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_exc,
+                        title=f"{bt_model} - Exceptions (Basel zone: {btr.basel_zone})",
+                        y_title="Count")
+    fig_exc.update_layout(height=360)
+    st.plotly_chart(fig_exc, width="stretch")
+
+# ── Tab: Model Comparison ──────────────────────────────────────────────────
+with tab_cmp:
+    st.markdown("#### VaR Model Comparison")
+    st.caption(
+        "Four VaR methodologies - Historical Simulation, EWMA (RiskMetrics), "
+        "GARCH-scaled and GJR-GARCH-scaled Historical VaR - evaluated on the same "
+        "rolling out-of-sample backtest."
+    )
+
+    sel_model = st.selectbox(
+        "Focus model", options=list(cmp_results.keys()), index=1,
+    )
+
+    m = cmp_results[sel_model]
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Avg VaR", f"{m.average_var:.2%}")
+    mc2.metric("VaR Volatility", f"{m.var_volatility:.2%}")
+    mc3.metric("Worst Daily Loss", f"{m.worst_daily_loss:.2%}")
+    mc4.metric("Expected Shortfall", f"{m.expected_shortfall:.2%}")
+    mc5.metric("Exceptions", f"{m.backtest.n_exceptions} / {m.backtest.n_observations}")
+
+    st.markdown("#### VaR Model Comparison (over backtest period)")
+    fig_cmp = go.Figure()
+    for name, cr in cmp_results.items():
+        fig_cmp.add_trace(go.Scatter(
+            x=cr.backtest.var_series.index,
+            y=cr.backtest.var_series,
+            mode="lines", name=name,
+            line=dict(color=MODEL_COLORS.get(name, COLOR_SECONDARY), width=1),
+        ))
+    _apply_chart_layout(fig_cmp, title="1-Day VaR Forecasts by Model (negative = loss threshold)",
+                        y_title="VaR", yformat=".1%")
+    st.plotly_chart(fig_cmp, width="stretch")
+
+    st.markdown(f"#### Actual P&L vs VaR - {sel_model}")
+    pv = float(initial_value)
+    plot_pnl = pd.DataFrame({
+        "actual_pnl": m.backtest.actual_returns * pv,
+        "var_pnl": m.backtest.var_series * pv,
+    })
+    fig_pnl = go.Figure()
+    fig_pnl.add_trace(go.Scatter(
+        x=plot_pnl.index, y=plot_pnl["actual_pnl"], mode="lines",
+        name="Actual P&L ($)", line=dict(color=COLOR_PRIMARY, width=0.8),
+    ))
+    fig_pnl.add_trace(go.Scatter(
+        x=plot_pnl.index, y=plot_pnl["var_pnl"], mode="lines",
+        name="VaR threshold ($)", line=dict(color=COLOR_NEGATIVE, width=1, dash="dot"),
+    ))
+    fig_pnl.add_hline(y=0, line_color="#dee2e6", line_width=0.8)
+    _apply_chart_layout(fig_pnl, title=f"{sel_model} - Daily P&L vs VaR Threshold",
+                        y_title="P&L ($)", yformat="$,.0f")
+    st.plotly_chart(fig_pnl, width="stretch")
+
+    st.markdown(f"#### Exceptions Overlay - {sel_model}")
+    fig_ov = go.Figure()
+    fig_ov.add_trace(go.Scatter(
+        x=m.backtest.actual_returns.index, y=m.backtest.actual_returns,
+        mode="lines", name="Actual return", line=dict(color=COLOR_PRIMARY, width=0.8),
+    ))
+    fig_ov.add_trace(go.Scatter(
+        x=m.backtest.var_series.index, y=m.backtest.var_series,
+        mode="lines", name="VaR", line=dict(color=COLOR_EWMA, width=1, dash="dot"),
+    ))
+    exc = m.backtest.actual_returns[m.backtest.exceptions.astype(bool)]
+    fig_ov.add_trace(go.Scatter(
+        x=exc.index, y=exc, mode="markers",
+        name="Exception", marker=dict(color=COLOR_NEGATIVE, size=5, symbol="x"),
+    ))
+    _apply_chart_layout(fig_ov, title=f"{sel_model} - Exceptions (return < VaR)",
+                        y_title="Return", yformat=".1%")
+    st.plotly_chart(fig_ov, width="stretch")
+
+    st.markdown("#### Backtesting Summary - Expected vs Observed Exceptions")
+    zone_color = {"Green": COLOR_POSITIVE, "Yellow": COLOR_EWMA, "Red": COLOR_NEGATIVE}
+    names = list(cmp_results.keys())
+    expected = [cmp_results[n].backtest.expected_exceptions for n in names]
+    observed = [cmp_results[n].backtest.n_exceptions for n in names]
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        x=names, y=expected, name="Expected", marker_color=COLOR_PRIMARY,
+        marker_line_width=0,
+    ))
+    fig_bar.add_trace(go.Bar(
+        x=names, y=observed, name="Observed",
+        marker_color=[zone_color[cmp_results[n].backtest.basel_zone] for n in names],
+        marker_line_width=0,
+    ))
+    fig_bar.update_layout(barmode="group", yaxis_title="Exceptions")
+    _apply_chart_layout(fig_bar, y_title="Exceptions")
+    st.plotly_chart(fig_bar, width="stretch")
+
+    st.markdown("#### Model Ranking")
+    rank_rows = []
+    for name in MODEL_ORDER:
+        if name not in cmp_results:
+            continue
+        cr = cmp_results[name]
+        rank_rows.append({
+            "Rank": cr.rank,
+            "Model": name,
+            "Zone": cr.backtest.basel_zone,
+            "Exceptions": cr.backtest.n_exceptions,
+            "Ratio": f"{cr.backtest.exception_ratio:.2%}",
+            "Avg VaR": f"{cr.average_var:.2%}",
+            "VaR Vol": f"{cr.var_volatility:.2%}",
+            "Worst Loss": f"{cr.worst_daily_loss:.2%}",
+            "ES": f"{cr.expected_shortfall:.2%}",
+            "Kupiec p": f"{cr.backtest.kupiec_pof_pvalue:.3g}",
+            "Result": cr.backtest.pass_fail,
+        })
+    rank_df = pd.DataFrame(rank_rows).sort_values("Rank").reset_index(drop=True)
+    st.dataframe(rank_df, width="stretch")
+
+# ── Tab: Stress Testing ────────────────────────────────────────────────────
+with tab_stress:
+    st.markdown("#### Stress Testing")
+    st.caption(
+        "Historical crises (actual portfolio loss when the window is in-sample, "
+        "otherwise a representative equity drawdown) and hypothetical shocks "
+        "(equity drops, volatility / correlation spikes, sector shock)."
+    )
+
+    zone_color = {"Green": COLOR_POSITIVE, "Yellow": COLOR_EWMA, "Red": COLOR_NEGATIVE}
+    alpha = 1.0 - confidence_level
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Worst-case scenario", stress.worst_case_name)
+    s2.metric("Worst-case loss", f"${stress.scenarios[stress.worst_case_name].stressed_loss_value:,.0f}")
+    s3.metric("Worst-case VaR", f"{stress.scenarios[stress.worst_case_name].stressed_var_pct:.2%}")
+
+    st.markdown("#### Stress Scenario Results")
+    srows = []
+    for name in stress.ranking:
+        sc = stress.scenarios[name]
+        srows.append({
+            "Scenario": name,
+            "Type": sc.scenario_type,
+            "Shock Return": f"{sc.shock_return_pct:.2%}",
+            "Stressed VaR": f"{sc.stressed_var_pct:.2%}",
+            "Stressed ES": f"{sc.stressed_es_pct:.2%}",
+            "Stressed Loss ($)": f"{sc.stressed_loss_value:,.0f}",
+            "Worst": "*" if sc.worst_case else "",
+        })
+    st.dataframe(pd.DataFrame(srows), width="stretch", height=300)
+
+    st.markdown("#### Scenario Loss Bar Chart")
+    loss_df = pd.DataFrame({
+        "Scenario": list(stress.scenarios.keys()),
+        "Stressed Loss ($)": [sc.stressed_loss_value for sc in stress.scenarios.values()],
+    }).sort_values("Stressed Loss ($)")
+    fig_loss = go.Figure(go.Bar(
+        x=loss_df["Stressed Loss ($)"], y=loss_df["Scenario"], orientation="h",
+        marker_color=COLOR_NEGATIVE,
+        text=loss_df["Stressed Loss ($)"].map(lambda v: f"${v:,.0f}"),
+        textposition="auto",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_loss, title="Stressed Portfolio Loss by Scenario",
+                        x_title="Loss ($)", y_title="")
+    st.plotly_chart(fig_loss, width="stretch")
+
+    st.markdown("#### Stress VaR Comparison")
+    var_df = pd.DataFrame({
+        "Scenario": list(stress.scenarios.keys()),
+        "Stressed VaR (%)": [sc.stressed_var_pct for sc in stress.scenarios.values()],
+        "Baseline VaR (%)": [abs(sc.baseline_var_pct) for sc in stress.scenarios.values()],
+    })
+    fig_svar = go.Figure()
+    fig_svar.add_trace(go.Bar(
+        x=var_df["Scenario"], y=var_df["Stressed VaR (%)"], name="Stressed VaR",
+        marker_color=COLOR_NEGATIVE, marker_line_width=0,
+    ))
+    fig_svar.add_trace(go.Bar(
+        x=var_df["Scenario"], y=var_df["Baseline VaR (%)"], name="Baseline VaR",
+        marker_color=COLOR_PRIMARY, marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_svar, y_title="VaR (%)", yformat=".1%")
+    st.plotly_chart(fig_svar, width="stretch")
+
+    st.markdown("#### Worst Loss Ranking")
+    rank_loss = pd.DataFrame({
+        "Scenario": list(stress.scenarios.keys()),
+        "Stressed VaR (%)": [sc.stressed_var_pct for sc in stress.scenarios.values()],
+    }).sort_values("Stressed VaR (%)")
+    fig_rank = go.Figure(go.Bar(
+        x=rank_loss["Stressed VaR (%)"], y=rank_loss["Scenario"], orientation="h",
+        marker_color=COLOR_GARCH,
+        text=rank_loss["Stressed VaR (%)"].map(lambda v: f"{v:.1%}"),
+        textposition="auto",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_rank, title="Worst Loss Ranking (by stressed VaR)",
+                        x_title="Stressed VaR (%)", y_title="")
+    fig_rank.update_layout(yaxis_tickformat=".1%")
+    st.plotly_chart(fig_rank, width="stretch")
+
+    st.markdown("#### Sector Shock Impact")
+    sec = stress.scenarios.get("Sector Shock")
+    if sec is not None and sec.sector_contrib is not None:
+        contrib = sec.sector_contrib.sort_values(ascending=False).head(10)
+        fig_sec = go.Figure(go.Bar(
+            x=contrib.index, y=contrib.values,
+            marker_color=[COLOR_NEGATIVE if v > 0 else COLOR_PRIMARY for v in contrib.values],
+            text=[f"${v:,.0f}" for v in contrib.values], textposition="auto",
+            marker_line_width=0,
+        ))
+        _apply_chart_layout(fig_sec, title="Sector Shock - Loss Contribution by Asset",
+                            y_title="Loss ($)", yformat="$,.0f")
+        st.plotly_chart(fig_sec, width="stretch")
+        st.caption(f"Stressed loss from sector shock: ${sec.stressed_loss_value:,.0f}")
+    else:
+        st.info("Sector shock impact unavailable.")
+
+    st.markdown("---")
+    st.markdown("#### Return & P&L Analysis")
+
+    dd = result.portfolio_value / result.portfolio_value.cummax() - 1.0
+    fig_dd = go.Figure(go.Scatter(
+        x=dd.index, y=dd, mode="lines", fill="tozeroy",
+        line=dict(color=COLOR_NEGATIVE, width=0.8),
+        fillcolor="rgba(220,53,69,0.1)",
+    ))
+    _apply_chart_layout(fig_dd, title="Drawdown (portfolio value vs running peak)",
+                        y_title="Drawdown", yformat=".1%")
+    fig_dd.update_layout(height=360)
+    st.plotly_chart(fig_dd, width="stretch")
+
+    fig_dist = go.Figure(go.Histogram(
+        x=result.portfolio_returns, nbinsx=60,
+        marker_color=COLOR_HIST, opacity=0.8,
+        marker_line=dict(width=0.3, color="#dee2e6"),
+    ))
+    _apply_chart_layout(fig_dist, title="Daily Return Distribution",
+                        x_title="Daily Return", y_title="Frequency", yformat=".1%")
+    fig_dist.update_layout(height=360)
+    st.plotly_chart(fig_dist, width="stretch")
+
+    st.markdown("---")
+    st.markdown("#### Volatility Analysis")
+
+    roll_win = int(min(250, max(20, len(result.portfolio_returns) // 3)))
+    roll_hist_var = result.portfolio_returns.rolling(roll_win).quantile(alpha)
+    fig_rv = go.Figure()
+    fig_rv.add_trace(go.Scatter(
+        x=result.portfolio_returns.index, y=result.portfolio_returns,
+        mode="lines", name="Actual return",
+        line=dict(color=COLOR_PRIMARY, width=0.6),
+    ))
+    fig_rv.add_trace(go.Scatter(
+        x=roll_hist_var.index, y=roll_hist_var,
+        mode="lines", name=f"Rolling Historical VaR ({roll_win}d)",
+        line=dict(color=COLOR_NEGATIVE, width=1, dash="dot"),
+    ))
+    _apply_chart_layout(fig_rv, title="Rolling Historical VaR vs Actual Returns",
+                        y_title="Return", yformat=".1%")
+    st.plotly_chart(fig_rv, width="stretch")
+
+    st.markdown("#### VaR vs Actual Loss (all models)")
+    fig_val = go.Figure()
+    for name, cr in cmp_results.items():
+        fig_val.add_trace(go.Scatter(
+            x=cr.backtest.actual_returns.index, y=cr.backtest.var_series,
+            mode="lines", name=f"{name} VaR",
+            line=dict(color=MODEL_COLORS.get(name), width=0.8, dash="dot"),
+        ))
+    any_cr = next(iter(cmp_results.values()))
+    fig_val.add_trace(go.Scatter(
+        x=any_cr.backtest.actual_returns.index, y=any_cr.backtest.actual_returns,
+        mode="lines", name="Actual return",
+        line=dict(color=COLOR_SECONDARY, width=0.6),
+    ))
+    _apply_chart_layout(fig_val, title="1-Day VaR Forecasts vs Realised Returns (backtest period)",
+                        y_title="Return", yformat=".1%")
+    st.plotly_chart(fig_val, width="stretch")
+
+    st.markdown("#### VaR vs Expected Shortfall")
+    var_es = pd.DataFrame({
+        "Model": ["Historical", "EWMA", "GARCH", "GJR-GARCH"],
+        "VaR (%)": [
+            abs(np.quantile(result.portfolio_returns.values, alpha)),
+            abs(ewma_full.var_pct),
+            abs(garch_res.var_pct),
+            abs(gjr_res.var_pct),
+        ],
+        "ES (%)": [
+            abs(np.mean(result.portfolio_returns.values[
+                result.portfolio_returns.values <= np.quantile(result.portfolio_returns.values, alpha)])),
+            abs(ewma_full.es_pct),
+            abs(garch_res.es_pct),
+            abs(gjr_res.es_pct),
+        ],
+    })
+    fig_ves = go.Figure()
+    fig_ves.add_trace(go.Bar(
+        x=var_es["Model"], y=var_es["VaR (%)"], name="VaR",
+        marker_color=COLOR_PRIMARY, marker_line_width=0,
+    ))
+    fig_ves.add_trace(go.Bar(
+        x=var_es["Model"], y=var_es["ES (%)"], name="Expected Shortfall",
+        marker_color=COLOR_NEGATIVE, marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_ves, y_title="Loss (%)", yformat=".1%")
+    st.plotly_chart(fig_ves, width="stretch")
+
+    st.markdown("#### Volatility Regime Comparison")
+    roll_std = result.portfolio_returns.rolling(21).std()
+    vol_cmp = pd.DataFrame({
+        "Rolling (21d)": roll_std,
+        "EWMA": ewma_full.conditional_volatility,
+        "GARCH": garch_res.conditional_volatility,
+        "GJR-GARCH": gjr_res.conditional_volatility,
+    }).dropna()
+    fig_vol = go.Figure()
+    vcolors = {"Rolling (21d)": COLOR_PRIMARY, "EWMA": COLOR_EWMA, "GARCH": COLOR_GARCH, "GJR-GARCH": COLOR_GJR}
+    for col in vol_cmp.columns:
+        fig_vol.add_trace(go.Scatter(
+            x=vol_cmp.index, y=vol_cmp[col], mode="lines", name=col,
+            line=dict(color=vcolors[col], width=0.8),
+        ))
+    _apply_chart_layout(fig_vol, title="Conditional / Rolling Volatility by Model",
+                        y_title="Daily volatility", yformat=".1%")
+    st.plotly_chart(fig_vol, width="stretch")
+
+    st.markdown("---")
+    st.markdown("#### Backtesting Summary")
+
+    bl_names = list(cmp_results.keys())
+    bl_zones = [cmp_results[n].backtest.basel_zone for n in bl_names]
+    fig_bl = go.Figure(go.Bar(
+        x=bl_names, y=[1] * len(bl_names),
+        marker_color=[zone_color[z] for z in bl_zones],
+        text=[f"{z} ({cmp_results[n].backtest.n_exceptions} exc)" for n, z in zip(bl_names, bl_zones)],
+        textposition="inside",
+        marker_line_width=0,
+    ))
+    fig_bl.update_layout(yaxis=dict(visible=False))
+    _apply_chart_layout(fig_bl, title="Basel Traffic Light by Model")
+    fig_bl.update_layout(height=220)
+    st.plotly_chart(fig_bl, width="stretch")
+
+    fig_exc = go.Figure(go.Bar(
+        x=bl_names, y=[cmp_results[n].backtest.n_exceptions for n in bl_names],
+        marker_color=[zone_color[cmp_results[n].backtest.basel_zone] for n in bl_names],
+        text=[cmp_results[n].backtest.n_exceptions for n in bl_names], textposition="auto",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_exc, title="Observed Exceptions by Model", y_title="Exceptions")
+    fig_exc.update_layout(height=340)
+    st.plotly_chart(fig_exc, width="stretch")
+
+    fig_ea = go.Figure()
+    fig_ea.add_trace(go.Bar(
+        x=bl_names, y=[cmp_results[n].backtest.expected_exceptions for n in bl_names],
+        name="Expected", marker_color=COLOR_PRIMARY, marker_line_width=0,
+    ))
+    fig_ea.add_trace(go.Bar(
+        x=bl_names, y=[cmp_results[n].backtest.n_exceptions for n in bl_names],
+        name="Observed",
+        marker_color=[zone_color[cmp_results[n].backtest.basel_zone] for n in bl_names],
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_ea, title="Expected vs Actual Exceptions", y_title="Exceptions")
+    st.plotly_chart(fig_ea, width="stretch")
+
+# ── Tab: Returns ────────────────────────────────────────────────────────────
 with tab_ret:
     fig_ret = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
@@ -406,7 +1143,7 @@ with tab_ret:
             x=result.portfolio_returns.index,
             y=result.portfolio_returns,
             mode="lines", name="Daily return",
-            line=dict(width=1, color="#ff7f0e"),
+            line=dict(width=0.8, color=COLOR_EWMA),
         ),
         row=1, col=1,
     )
@@ -414,14 +1151,22 @@ with tab_ret:
     fig_ret.add_trace(
         go.Scatter(
             x=cum_ret.index, y=cum_ret, mode="lines", name="Cumulative",
-            line=dict(width=2, color="#1f77b4"), fill="tozeroy",
+            line=dict(width=1.5, color=COLOR_PRIMARY), fill="tozeroy",
+            fillcolor="rgba(13,110,253,0.08)",
         ),
         row=2, col=1,
     )
-    fig_ret.update_layout(height=600, template="plotly_white", showlegend=False)
-    fig_ret.update_yaxes(tickformat=".1%", row=1, col=1)
-    fig_ret.update_yaxes(tickformat=".1%", row=2, col=1)
-    st.plotly_chart(fig_ret, use_container_width=True)
+    fig_ret.update_layout(
+        height=580,
+        paper_bgcolor=CHART_PAPER,
+        plot_bgcolor=CHART_BG,
+        font=dict(size=CHART_FONT_SIZE, color=CHART_FONT, family="Inter"),
+        showlegend=False,
+        margin=dict(l=50, r=20, t=40, b=40),
+    )
+    fig_ret.update_xaxes(gridcolor=CHART_GRID, gridwidth=0.5, linecolor="#dee2e6", linewidth=0.5)
+    fig_ret.update_yaxes(gridcolor=CHART_GRID, gridwidth=0.5, linecolor="#dee2e6", linewidth=0.5, tickformat=".1%")
+    st.plotly_chart(fig_ret, width="stretch")
 
     rets = result.portfolio_returns.dropna()
     if len(rets) > 1:
@@ -437,32 +1182,44 @@ with tab_ret:
             "Skew": f"{rets.skew():.2f}",
             "Kurtosis": f"{rets.kurtosis():.2f}",
         }
-        st.subheader("Return statistics")
+        st.markdown("#### Return Statistics")
         st.table(pd.Series(stats, name="Value"))
 
+# ── Tab: Weights ────────────────────────────────────────────────────────────
 with tab_w:
-    st.subheader("Target weights")
+    st.markdown("#### Target Weights")
     tw = result.target_weights.sort_values(ascending=False)
-    fig_w = px.bar(
+    fig_w = go.Figure(go.Bar(
         x=tw.index, y=tw.values,
-        labels={"x": "Ticker", "y": "Weight"},
-        title="Target Allocation",
-        color=tw.values, color_continuous_scale="RdYlGn",
-    )
-    fig_w.update_layout(height=360, template="plotly_white", showlegend=False)
-    st.plotly_chart(fig_w, use_container_width=True)
+        marker_color=[COLOR_PRIMARY if v >= 0 else COLOR_NEGATIVE for v in tw.values],
+        text=[f"{v:.1%}" for v in tw.values],
+        textposition="outside",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(fig_w, title="Target Allocation",
+                        x_title="Ticker", y_title="Weight", yformat=".0%")
+    fig_w.update_layout(height=340)
+    st.plotly_chart(fig_w, width="stretch")
 
-    st.subheader("Weight evolution")
+    st.markdown("#### Weight Evolution")
     show_cols = list(result.weights_history.columns)[:8]
-    fig_wh = px.line(result.weights_history[show_cols], title="Daily weights over time")
-    fig_wh.update_layout(height=400, template="plotly_white", yaxis_tickformat=".0%")
-    st.plotly_chart(fig_wh, use_container_width=True)
+    fig_wh = go.Figure()
+    for col in show_cols:
+        fig_wh.add_trace(go.Scatter(
+            x=result.weights_history.index, y=result.weights_history[col],
+            mode="lines", name=col, line=dict(width=0.8),
+        ))
+    _apply_chart_layout(fig_wh, title="Daily Weights Over Time",
+                        y_title="Weight", yformat=".0%")
+    fig_wh.update_layout(height=380)
+    st.plotly_chart(fig_wh, width="stretch")
 
-    with st.expander("Holdings (shares) – last 10 days"):
-        st.dataframe(result.holdings.tail(10).style.format("{:.2f}"), use_container_width=True)
+    with st.expander("Holdings (shares) - last 10 days"):
+        st.dataframe(result.holdings.tail(10).style.format("{:.2f}"), width="stretch")
 
+# ── Tab: Data ───────────────────────────────────────────────────────────────
 with tab_data:
-    st.subheader("Daily series")
+    st.markdown("#### Daily Series")
     df_out = pd.DataFrame({
         "portfolio_value": result.portfolio_value,
         "portfolio_pnl": result.portfolio_pnl,
@@ -474,18 +1231,19 @@ with tab_data:
             "portfolio_pnl": "{:,.2f}",
             "portfolio_returns": "{:.4%}",
         }),
-        use_container_width=True,
+        width="stretch",
         height=400,
     )
     csv = df_out.to_csv().encode("utf-8")
-    st.download_button("⬇️ Download CSV", data=csv, file_name="portfolio_daily.csv", mime="text/csv")
+    st.download_button("Download CSV", data=csv, file_name="portfolio_daily.csv", mime="text/csv")
 
-    st.subheader("Cleaning summary")
+    st.markdown("#### Cleaning Summary")
     ov = data_overview(clean_prices)
     st.text(ov.summary_text())
 
-st.divider()
+# ── Footer ──────────────────────────────────────────────────────────────────
+st.markdown("---")
 st.caption(
-    f"Scheme: **{scheme}** · Rebalance: **{rebalance_freq}** · "
-    f"Cost: **{transaction_cost_bps} bps** · Period: {start_date} → {end_date}"
+    f"Scheme: {scheme} | Rebalance: {rebalance_freq} | "
+    f"Cost: {transaction_cost_bps} bps | Period: {start_date} to {end_date}"
 )
