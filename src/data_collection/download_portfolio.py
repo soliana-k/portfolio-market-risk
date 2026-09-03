@@ -1,6 +1,5 @@
 import pandas as pd
 from typing import List
-import numpy as np
 import yfinance as yf
 import time
 
@@ -122,3 +121,71 @@ def download_market_caps(tickers: List[str]) -> pd.Series:
     if s.isna().all():
         raise ValueError("Could not retrieve market caps for any ticker.")
     return s
+
+
+def download_asset_prices_cached(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    market_benchmark: str = "^GSPC",
+    force_refresh: bool = False,
+    on_stale=None,
+) -> pd.DataFrame:
+    """Download asset + benchmark prices with a file cache.
+
+    Cached under ``data/raw`` using a key derived from tickers and the date
+    window, so repeat runs are instant. Set ``force_refresh=True`` to bypass.
+
+    If a live download fails but an older cache entry exists, the stale frame is
+    returned (graceful offline fallback) and ``on_stale`` is invoked with the
+    cache metadata so the caller can surface a warning.
+    """
+    from src.data_collection.cache import load_cached, load_cached_stale, save_cache
+
+    cache_key = f"prices_{tickers}_{start_date}_{end_date}_{market_benchmark}"
+    if not force_refresh:
+        frame, _ = load_cached(cache_key)
+        if frame is not None:
+            return frame
+
+    try:
+        frame = download_asset_prices(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            market_benchmark=market_benchmark,
+        )
+        save_cache(cache_key, frame, {"kind": "prices", "tickers": tickers})
+        return frame
+    except Exception:
+        stale_frame, stale_meta = load_cached_stale(cache_key)
+        if stale_frame is not None:
+            if on_stale is not None:
+                on_stale(stale_meta)
+            return stale_frame
+        raise
+
+
+def download_market_caps_cached(
+    tickers: List[str], force_refresh: bool = False, on_stale=None
+) -> pd.Series:
+    """Market caps for tickers, cached like prices (stale fallback included)."""
+    from src.data_collection.cache import load_cached, load_cached_stale, save_cache
+
+    key = f"caps_{sorted(tickers)}"
+    if not force_refresh:
+        frame, _ = load_cached(key, ttl_hours=12.0)
+        if frame is not None:
+            return frame.iloc[:, 0].astype(float).reindex(tickers)
+
+    try:
+        caps = download_market_caps(tickers)
+        save_cache(key, caps.to_frame("cap"), {"kind": "market_caps", "tickers": tickers})
+        return caps
+    except Exception:
+        stale_frame, stale_meta = load_cached_stale(key)
+        if stale_frame is not None:
+            if on_stale is not None:
+                on_stale(stale_meta)
+            return stale_frame.iloc[:, 0].astype(float).reindex(tickers)
+        raise

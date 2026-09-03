@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 
 def calculate_daily_returns(prices_df: pd.DataFrame) -> pd.DataFrame:

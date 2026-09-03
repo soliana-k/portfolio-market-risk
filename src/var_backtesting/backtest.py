@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -231,7 +231,6 @@ def backtest_model(
             f"supply a longer return history."
         )
 
-    alpha = 1.0 - confidence_level
     var_vals: list[float] = []
     actual_vals: list[float] = []
     dates: list[pd.Timestamp] = []

@@ -14,7 +14,6 @@ from src.portfolio_construction.portfolio import (
     make_equal_weights,
     make_user_weights,
     make_long_short_weights,
-    make_market_cap_weights,
     _rebalance_mask,
     _normalize_weights,
     PortfolioResult,
@@ -154,7 +153,7 @@ class TestRebalanceMask:
         dates = pd.bdate_range("2023-01-01", periods=20)
         mask = _rebalance_mask(dates, "none")
         assert mask.sum() == 1
-        assert mask.iloc[0] is True or mask.iloc[0] == True
+        assert bool(mask.iloc[0])
 
     def test_daily(self):
         dates = pd.bdate_range("2023-01-01", periods=10)

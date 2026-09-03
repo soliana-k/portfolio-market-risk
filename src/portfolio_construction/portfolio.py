@@ -57,11 +57,22 @@ def make_equal_weights(tickers: list[str]) -> pd.Series:
     return pd.Series(1.0 / n, index=tickers, dtype=float)
 
 
-def make_market_cap_weights(tickers: list[str]) -> pd.Series:
-    caps = download_market_caps(tickers)
+def make_market_cap_weights(tickers: list[str], caps: Optional[pd.Series] = None) -> pd.Series:
+    """Market-cap weighted weights.
+
+    Args:
+        tickers: List of tickers to weight.
+        caps: Optional pre-fetched market-cap series (e.g. cached). When
+            omitted the market caps are downloaded live.
+    """
+    if caps is None:
+        caps = download_market_caps(tickers)
     caps = caps.reindex(tickers).fillna(0.0)
     if caps.sum() <= 0:
-        raise ValueError("All market caps are zero / missing – cannot build weights.")
+        raise ValueError(
+            "All market caps are zero / missing - cannot build weights. "
+            "Check tickers or try again (Yahoo may be rate-limiting requests)."
+        )
     return (caps / caps.sum()).astype(float)
 
 
@@ -227,6 +238,7 @@ def resolve_target_weights(
     short_tickers: Optional[list[str]] = None,
     long_weight: float = 0.5,
     short_weight: float = 0.5,
+    market_caps: Optional[pd.Series] = None,
 ) -> pd.Series:
     if scheme == "equal":
         return make_equal_weights(tickers)
@@ -235,7 +247,7 @@ def resolve_target_weights(
             raise ValueError("user_weights required for scheme='user'")
         return make_user_weights(tickers, user_weights)
     if scheme == "market_cap":
-        return make_market_cap_weights(tickers)
+        return make_market_cap_weights(tickers, caps=market_caps)
     if scheme == "long_short":
         return make_long_short_weights(
             tickers,

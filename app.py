@@ -20,7 +20,10 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data_collection.download_portfolio import download_asset_prices
+from src.data_collection.download_portfolio import (
+    download_asset_prices_cached,
+    download_market_caps_cached,
+)
 from src.data_cleaning.cleaning import run_data_cleaning_pipeline, data_overview
 from src.portfolio_construction.portfolio import (
     construct_portfolio,
@@ -34,6 +37,15 @@ from src.ewma_var.ewma import fit_ewma
 from src.var_backtesting.backtest import run_all_backtests, backtest_model
 from src.model_comparison.compare import assemble_comparison, MODEL_ORDER
 from src.stress_testing.stress import run_stress_tests
+from src.analytics.portfolio_metrics import (
+    asset_correlation_matrix,
+    asset_return_attribution,
+    concentration_metrics,
+    multi_confidence_var_es,
+    portfolio_variance,
+    rolling_exception_series,
+)
+from src.analytics.report import build_html_report
 
 # ── Page Config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -156,6 +168,11 @@ with st.sidebar:
 
     st.markdown("---")
     run_btn = st.button("Build Portfolio", type="primary", width="stretch")
+    force_refresh = st.checkbox(
+        "Force fresh data download",
+        value=False,
+        help="Bypass the cache and re-download prices & market caps from Yahoo Finance.",
+    )
 
     with st.expander("Cleaning options"):
         apply_winsor = st.checkbox("Winsorise returns", value=False)
@@ -180,9 +197,19 @@ if start_date >= end_date:
 progress = st.progress(0, text="Starting...")
 status = st.empty()
 
+stale_flags: list = []
+
 try:
     status.info("Resolving target weights...")
     progress.progress(10, text="Weights")
+
+    market_caps_series = None
+    if scheme == "market_cap":
+        market_caps_series = download_market_caps_cached(
+            tickers,
+            force_refresh=force_refresh,
+            on_stale=lambda m: stale_flags.append(m.get("saved_at")),
+        )
 
     target_w = resolve_target_weights(
         scheme=scheme,
@@ -192,16 +219,19 @@ try:
         short_tickers=short_tickers if scheme == "long_short" else None,
         long_weight=long_weight,
         short_weight=short_weight,
+        market_caps=market_caps_series,
     )
 
     status.info(f"Downloading prices for {', '.join(tickers)}...")
     progress.progress(25, text="Downloading")
 
-    prices_raw = download_asset_prices(
+    prices_raw = download_asset_prices_cached(
         tickers=tickers,
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
         market_benchmark="^GSPC",
+        force_refresh=force_refresh,
+        on_stale=lambda m: stale_flags.append(m.get("saved_at")),
     )
     prices = prices_raw[tickers].copy()
 
@@ -301,8 +331,70 @@ try:
         confidence_level=confidence_level,
     )
 
+    # ── Additional analytics (correlation, diversification, attribution) ──
+    asset_rets = clean_prices.pct_change().dropna()
+    corr_matrix = asset_correlation_matrix(asset_rets)
+    div_metrics = concentration_metrics(result.target_weights)
+    multi_var_es = multi_confidence_var_es(
+        result.portfolio_returns,
+        result.portfolio_value,
+        confidences=[0.95, 0.975, 0.99, 0.995],
+    )
+    attribution = asset_return_attribution(asset_rets, result.target_weights)
+    portfolio_var = portfolio_variance(result.target_weights, asset_rets.cov())
+
+    # Benchmark (S&P 500) series aligned to the portfolio, if available.
+    benchmark_col = None
+    for cand in ("^GSPC", "GSPC"):
+        if cand in prices_raw.columns:
+            benchmark_col = cand
+            break
+    benchmark_rets = None
+    if benchmark_col is not None:
+        bench_prices = (
+            prices_raw[benchmark_col]
+            .reindex(result.portfolio_value.index)
+            .ffill()
+        )
+        benchmark_rets = bench_prices.pct_change().dropna()
+
+    from datetime import datetime as _dt
+
+    refresh_ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+
     progress.progress(100, text="Done")
     status.success("Portfolio constructed successfully.")
+
+    # Persist the run so switching tabs doesn't recompute the pipeline.
+    st.session_state["results"] = {
+        "meta": result.metadata,
+        "result": result,
+        "risk_metrics": risk_metrics,
+        "rolling_df": rolling_df,
+        "garch_res": garch_res,
+        "gjr_res": gjr_res,
+        "ewma_full": ewma_full,
+        "bt_results": bt_results,
+        "cmp_results": cmp_results,
+        "stress": stress,
+        "corr_matrix": corr_matrix,
+        "div_metrics": div_metrics,
+        "multi_var_es": multi_var_es,
+        "attribution": attribution,
+        "portfolio_var": portfolio_var,
+        "benchmark_rets": benchmark_rets,
+        "clean_prices": clean_prices,
+        "asset_rets": asset_rets,
+        "refresh_ts": refresh_ts,
+        "params": {
+            "scheme": scheme,
+            "rebalance_freq": rebalance_freq,
+            "transaction_cost_bps": transaction_cost_bps,
+            "start_date": start_date,
+            "end_date": end_date,
+            "conf_str": conf_str,
+        },
+    }
 
 except Exception as e:
     progress.empty()
@@ -315,6 +407,19 @@ except Exception as e:
 # so the dashboard front stays clean.
 progress.empty()
 status.empty()
+
+if stale_flags:
+    from datetime import datetime as _dt
+
+    for saved_at in stale_flags:
+        if saved_at:
+            ts = _dt.fromtimestamp(float(saved_at)).strftime("%Y-%m-%d %H:%M")
+        else:
+            ts = "an unknown time"
+        st.warning(
+            f"Live data is currently unavailable - showing the last cached "
+            f"data from {ts}. Re-run later to refresh."
+        )
 
 # ── Chart Theme ─────────────────────────────────────────────────────────────
 CHART_BG = "#ffffff"
@@ -372,6 +477,30 @@ def _apply_chart_layout(fig, title="", height=420, yformat="", x_title="", y_tit
 
 # ── Results: Dashboard KPI Header ──────────────────────────────────────────
 meta = result.metadata
+
+# Header bar: last refresh timestamp + US market open/close status.
+try:
+    from datetime import datetime as _nowmod
+    import pytz as _pytz  # type: ignore
+
+    now_utc = _nowmod.now(_pytz.timezone("UTC"))
+    ny = _nowmod.now(_pytz.timezone("America/New_York"))
+    _mark_open = 9.5 <= ny.hour + ny.minute / 60 < 16.0 and ny.weekday() < 5
+    _status = "Market Open" if _mark_open else "Market Closed"
+    _status_color = COLOR_POSITIVE if _mark_open else COLOR_NEGATIVE
+    hb1, hb2, hb3 = st.columns([2, 2, 3])
+    hb1.metric("Last Data Refresh", refresh_ts)
+    hb2.metric("US Market", _status)
+    hb3.write("")
+    st.caption(
+        f"Time in New York: {ny.strftime('%Y-%m-%d %H:%M')} — "
+        "prices reflect the most recently cached session."
+    )
+except Exception:
+    hb1, hb2, hb3 = st.columns([2, 2, 3])
+    hb1.metric("Last Data Refresh", refresh_ts)
+    hb2.metric("", "")
+    hb3.write("")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Final Value", f"${meta['final_value']:,.0f}")
@@ -463,9 +592,30 @@ with st.expander(
 st.markdown("---")
 
 # ── Tabs ────────────────────────────────────────────────────────────────────
-tab_val, tab_pnl, tab_risk, tab_bt, tab_cmp, tab_stress, tab_ret, tab_w, tab_data = st.tabs(
-    ["Portfolio Value", "Daily P&L", "Risk & VaR", "Backtest",
-     "Model Comparison", "Stress Testing", "Returns", "Weights", "Data"]
+(
+    tab_val,
+    tab_pnl,
+    tab_risk,
+    tab_bt,
+    tab_cmp,
+    tab_stress,
+    tab_ret,
+    tab_ana,
+    tab_w,
+    tab_data,
+) = st.tabs(
+    [
+        "Portfolio Value",
+        "Daily P&L",
+        "Risk & VaR",
+        "Backtest",
+        "Model Comparison",
+        "Stress Testing",
+        "Returns",
+        "Analytics",
+        "Weights",
+        "Data",
+    ]
 )
 
 # ── Tab: Portfolio Value ────────────────────────────────────────────────────
@@ -494,6 +644,44 @@ with tab_val:
     _apply_chart_layout(fig, title="Daily Portfolio Value", y_title="Value ($)", yformat="$.0f")
     fig.update_layout(height=440)
     st.plotly_chart(fig, width="stretch")
+
+    if benchmark_rets is not None:
+        st.markdown("#### Portfolio vs S&P 500 (^GSPC)")
+        port_norm = result.portfolio_value / result.portfolio_value.iloc[0]
+        bench_norm = (1 + benchmark_rets).cumprod()
+        cmp_df = pd.DataFrame(
+            {
+                "Portfolio": port_norm.reindex(bench_norm.index).ffill(),
+                "S&P 500": bench_norm,
+            }
+        ).dropna()
+        fig_cmp = go.Figure()
+        fig_cmp.add_trace(
+            go.Scatter(
+                x=cmp_df.index, y=cmp_df["Portfolio"], mode="lines",
+                name="Portfolio", line=dict(width=1.8, color=COLOR_PRIMARY),
+            )
+        )
+        fig_cmp.add_trace(
+            go.Scatter(
+                x=cmp_df.index, y=cmp_df["S&P 500"], mode="lines",
+                name="S&P 500", line=dict(width=1.6, color=COLOR_SECONDARY, dash="dash"),
+            )
+        )
+        _apply_chart_layout(
+            fig_cmp,
+            title="Growth of $1 (Portfolio vs Benchmark)",
+            y_title="Growth",
+        )
+        fig_cmp.update_layout(height=400)
+        st.plotly_chart(fig_cmp, width="stretch")
+
+        port_ret = port_norm.iloc[-1] - 1
+        bench_ret = bench_norm.iloc[-1] - 1
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Portfolio Return", f"{port_ret:.2%}")
+        c2.metric("S&P 500 Return", f"{bench_ret:.2%}")
+        c3.metric("Excess Return", f"{port_ret - bench_ret:+.2%}")
 
 # ── Tab: Daily P&L ─────────────────────────────────────────────────────────
 with tab_pnl:
@@ -562,7 +750,7 @@ with tab_risk:
         mode="lines", name="Rolling Expected Shortfall",
         line=dict(color="#8b0000", width=1.2, dash="dash"),
     ))
-    _apply_chart_layout(fig_rolling, title=f"Rolling VaR vs Expected Shortfall ($)",
+    _apply_chart_layout(fig_rolling, title="Rolling VaR vs Expected Shortfall ($)",
                         y_title="Risk Measure ($)")
     st.plotly_chart(fig_rolling, width="stretch")
 
@@ -765,6 +953,42 @@ with tab_bt:
                         y_title="Count")
     fig_exc.update_layout(height=360)
     st.plotly_chart(fig_exc, width="stretch")
+
+    # ── Rolling exception rate + backtest p-value summary ────────────────────
+    win = st.slider("Rolling exception window (days)", 20, 120, 60)
+    roll_rate = rolling_exception_series(btr.exceptions, window=win)
+    fig_roll = go.Figure()
+    fig_roll.add_trace(go.Scatter(
+        x=roll_rate.index, y=roll_rate, mode="lines",
+        name="Rolling exception rate", line=dict(color=COLOR_GARCH, width=1.5),
+    ))
+    fig_roll.add_hline(y=1 - confidence_level, line_dash="dash",
+                       line_color=COLOR_SECONDARY,
+                       annotation_text=f"Target (1 - {conf_str})",
+                       annotation_font=dict(size=10))
+    _apply_chart_layout(
+        fig_roll,
+        title=f"{bt_model} - Rolling {win}-day Exception Rate",
+        y_title="Exception rate", yformat=".1%",
+    )
+    fig_roll.update_layout(height=360)
+    st.plotly_chart(fig_roll, width="stretch")
+
+    st.markdown("#### Backtest Hypothesis Test p-values")
+    pv_rows = [
+        {"Test": "Kupiec POF (unconditional coverage)",
+         "p-value": f"{btr.kupiec_pof_pvalue:.4g}"},
+        {"Test": "Christoffersen independence",
+         "p-value": f"{btr.christoffersen_independence_pvalue:.4g}"},
+        {"Test": "Christoffersen CC (joint)",
+         "p-value": f"{btr.christoffersen_cc_pvalue:.4g}"},
+        {"Test": "Pass / Fail", "p-value": btr.pass_fail},
+    ]
+    st.dataframe(
+        pd.DataFrame(pv_rows).set_index("Test"),
+        use_container_width=True,
+        hide_index=False,
+    )
 
 # ── Tab: Model Comparison ──────────────────────────────────────────────────
 with tab_cmp:
@@ -1185,6 +1409,111 @@ with tab_ret:
         st.markdown("#### Return Statistics")
         st.table(pd.Series(stats, name="Value"))
 
+# ── Tab: Analytics ──────────────────────────────────────────────────────────
+with tab_ana:
+    st.markdown("#### Diversification & Concentration")
+    div_c1, div_c2, div_c3 = st.columns(3)
+    div_c1.metric("Herfindahl Index (HHI)", f"{div_metrics.get('HHI', 0):.3f}")
+    div_c2.metric("Effective Number of Assets", f"{div_metrics.get('Effective N', 0):.2f}")
+    div_c3.metric("Largest Weight", f"{div_metrics.get('Largest weight', 0):.2%}")
+
+    st.markdown("#### Correlation Heatmap (Asset Returns)")
+    corr_tickers = list(corr_matrix.columns)
+    fig_heat = go.Figure(
+        go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_tickers,
+            y=corr_tickers,
+            colorscale="RdBu",
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            hovertemplate="%{y} / %{x}: %{z:.2f}<extra></extra>",
+        )
+    )
+    _apply_chart_layout(fig_heat, title="Asset Return Correlation",
+                        x_title="", y_title="")
+    fig_heat.update_layout(
+        height=440,
+        xaxis=dict(tickangle=-45, gridcolor=CHART_GRID),
+        yaxis=dict(gridcolor=CHART_GRID),
+        coloraxis_colorbar=dict(title="Corr."),
+    )
+    st.plotly_chart(fig_heat, width="stretch")
+
+    st.markdown("#### Multi-Confidence VaR & Expected Shortfall")
+    mve_rows = []
+    for _, r in multi_var_es.iterrows():
+        mve_rows.append(
+            {
+                "Confidence": f"{r['conf_level']:.0%}",
+                "VaR (%)": f"{r['var_pct']:.2%}",
+                "VaR ($)": f"${r['var_dollar']:,.0f}",
+                "ES (%)": f"{r['es_pct']:.2%}",
+                "ES ($)": f"${r['es_dollar']:,.0f}",
+            }
+        )
+    st.dataframe(
+        pd.DataFrame(mve_rows).set_index("Confidence"),
+        use_container_width=True,
+        hide_index=False,
+    )
+    mve_chart = go.Figure()
+    mve_chart.add_trace(go.Bar(
+        x=multi_var_es["confidence"].astype(str),
+        y=-multi_var_es["var_dollar"],
+        name="VaR ($)",
+        marker_color=COLOR_NEGATIVE,
+        marker_line_width=0,
+    ))
+    mve_chart.add_trace(go.Bar(
+        x=multi_var_es["confidence"].astype(str),
+        y=-multi_var_es["es_dollar"],
+        name="ES ($)",
+        marker_color=COLOR_GARCH,
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(
+        mve_chart,
+        title="Tail-Risk by Confidence Level (loss, $)",
+        y_title="Loss ($)", yformat="$,.0f",
+    )
+    mve_chart.update_layout(height=380, barmode="group")
+    st.plotly_chart(mve_chart, width="stretch")
+
+    st.markdown("#### Return Attribution by Asset")
+    attr_df = attribution.sort_values("contribution_pct", ascending=False)
+    attr_colors = [
+        COLOR_POSITIVE if v >= 0 else COLOR_NEGATIVE
+        for v in attr_df["contribution_pct"]
+    ]
+    fig_attr = go.Figure(go.Bar(
+        x=attr_df["asset"], y=attr_df["contribution_pct"],
+        marker_color=attr_colors, text=attr_df["contribution_share"],
+        texttemplate="%{text:.1%}", textposition="auto",
+        marker_line_width=0,
+    ))
+    _apply_chart_layout(
+        fig_attr,
+        title="Contribution to Portfolio Return by Asset",
+        y_title="Contribution (%)",
+    )
+    fig_attr.update_layout(height=380, xaxis=dict(tickangle=-45))
+    st.plotly_chart(fig_attr, width="stretch")
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Asset": attr_df["asset"],
+                "Total Return": attr_df["total_return"].map(lambda v: f"{v:.2%}"),
+                "Weight": attr_df["weight"].map(lambda v: f"{v:.2%}"),
+                "Contribution (%)": attr_df["contribution_pct"].map(lambda v: f"{v:.2%}"),
+                "Contribution Share": attr_df["contribution_share"].map(lambda v: f"{v:.2%}"),
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 # ── Tab: Weights ────────────────────────────────────────────────────────────
 with tab_w:
     st.markdown("#### Target Weights")
@@ -1247,3 +1576,62 @@ st.caption(
     f"Scheme: {scheme} | Rebalance: {rebalance_freq} | "
     f"Cost: {transaction_cost_bps} bps | Period: {start_date} to {end_date}"
 )
+
+# ── Export Report ───────────────────────────────────────────────────────────
+st.markdown("#### Export Report")
+st.caption(
+    "Download a self-contained HTML report (print-to-PDF friendly) or a bundle "
+    "of CSV exports for further analysis."
+)
+
+try:
+    backtest_rows_for_report = [
+        {
+            "model": name,
+            "zone": cr.backtest.basel_zone,
+            "ratio": cr.backtest.exception_ratio,
+            "kupiec_p": cr.backtest.kupiec_pof_pvalue,
+        }
+        for name, cr in cmp_results.items()
+    ]
+    html_report = build_html_report(
+        meta=meta,
+        scheme=scheme,
+        rebalance_freq=rebalance_freq,
+        transaction_cost_bps=float(transaction_cost_bps),
+        start_date=start_date,
+        end_date=end_date,
+        conf_str=conf_str,
+        target_weights=result.target_weights,
+        risk_metrics=risk_metrics,
+        garch_res=garch_res,
+        gjr_res=gjr_res,
+        ewma_res=ewma_full,
+        cmp_results=cmp_results,
+        stress=stress,
+        correlation_df=corr_matrix,
+        div_metrics=div_metrics,
+        multi_var_es=multi_var_es,
+        attribution=attribution,
+        backtest_rows=backtest_rows_for_report,
+    )
+    ex_c1, ex_c2 = st.columns(2)
+    ex_c1.download_button(
+        "Download HTML Report",
+        data=html_report.encode("utf-8"),
+        file_name="portfolio_risk_report.html",
+        mime="text/html",
+    )
+    ex_c2.download_button(
+        "Download Portfolio CSV",
+        data=pd.DataFrame(
+            {
+                "portfolio_value": result.portfolio_value,
+                "portfolio_return": result.portfolio_returns,
+            }
+        ).to_csv().encode("utf-8"),
+        file_name="portfolio_daily_full.csv",
+        mime="text/csv",
+    )
+except Exception as _e:
+    st.warning(f"Report export unavailable: {_e}")

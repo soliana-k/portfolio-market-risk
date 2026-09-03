@@ -49,13 +49,11 @@ class HistoricalSimulation:
         dates = []
 
         pnl_vals = self.portfolio_pnl.values
-        val_vals = self.portfolio_values.reindex(self.portfolio_pnl.index).values
         idx = self.portfolio_pnl.index
 
         for i in range(window, len(pnl_vals) + 1):
             window_pnl = pnl_vals[i - window : i]
-            current_val = val_vals[i - 1]
-            
+
             sorted_window = np.sort(window_pnl)
             var_idx = int(np.floor(alpha * window))
             var_dollar = sorted_window[max(0, var_idx)]
